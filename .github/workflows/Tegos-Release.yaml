@@ -36,8 +36,40 @@ jobs:
           # Check out exactly the commit that the CICD build ran on.
           ref: ${{ github.event.workflow_run.head_sha }}
 
+      - name: Check release settings
+        id: gate
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const settingsPath = process.env.ALGO_SETTINGS_PATH;
+
+            // Default: create a release. The setting is optional - when it is
+            // missing (or settings.json itself is missing) releases are enabled.
+            let enabled = true;
+
+            if (fs.existsSync(settingsPath)) {
+              try {
+                const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+                if (Object.prototype.hasOwnProperty.call(settings, 'tegosReleaseEnabled')) {
+                  enabled = settings.tegosReleaseEnabled === true;
+                }
+              } catch (err) {
+                core.warning(`Failed to parse '${settingsPath}': ${err.message}. Releases stay enabled.`);
+              }
+            } else {
+              core.info(`'${settingsPath}' not found. Releases stay enabled.`);
+            }
+
+            core.info(`Release enabled: ${enabled}`);
+            core.setOutput('enabled', String(enabled));
+            if (!enabled) {
+              core.notice("Release creation is disabled via 'tegosReleaseEnabled' in .AL-Go/settings.json. Skipping.");
+            }
+
       - name: Determine release version from app.json
         id: version
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
         uses: actions/github-script@v7
         with:
           script: |
@@ -113,6 +145,7 @@ jobs:
               .write();
 
       - name: Trigger CreateRelease
+        if: ${{ steps.gate.outputs.enabled == 'true' }}
         uses: actions/github-script@v7
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}

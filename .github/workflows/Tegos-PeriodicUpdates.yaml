@@ -1,0 +1,56 @@
+name: 'Tegos Periodic Updates'
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub liest diesen cron-Wert statisch aus dem YAML (Default-Branch).
+    # Die Uhrzeit kann NICHT zur Laufzeit aus settings.json gelesen werden.
+    # Aktivieren/Deaktivieren erfolgt ueber 'tegosPeriodicUpdatesEnabled' in .AL-Go/settings.json.
+    - cron: '0 22 * * *'
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  CheckSchedule:
+    name: Check schedule settings
+    runs-on: windows-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read settings
+        id: check
+        run: |
+          $enabled = $true
+          $settingsPath = Join-Path $env:GITHUB_WORKSPACE '.AL-Go/settings.json'
+          if (Test-Path $settingsPath) {
+            $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
+            if ($settings.PSObject.Properties.Name -contains 'tegosPeriodicUpdatesEnabled') {
+              $enabled = [bool]$settings.tegosPeriodicUpdatesEnabled
+            }
+          }
+          # Manuelle Ausfuehrung (workflow_dispatch) laeuft immer, unabhaengig vom Flag.
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+            $enabled = $true
+          }
+          $enabledStr = $enabled.ToString().ToLower()
+          Write-Host "Periodic updates enabled: $enabledStr"
+          Add-Content -Path $env:GITHUB_OUTPUT -Value "enabled=$enabledStr"
+
+  UpdateGitHubGoSystemFiles:
+    name: Update AL-Go System Files
+    needs: CheckSchedule
+    if: needs.CheckSchedule.outputs.enabled == 'true'
+    uses: ./.github/workflows/UpdateGitHubGoSystemFiles.yaml
+    secrets: inherit
+    with:
+      caller: ${{ github.workflow }}
