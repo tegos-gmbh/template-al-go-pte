@@ -1,0 +1,164 @@
+name: 'Tegos - Release'
+run-name: 'Tegos - Release (after CICD #${{ github.event.workflow_run.run_number }})'
+
+# Event-driven: this workflow reacts to the standard CICD workflow completing,
+# so there is no polling and almost no extra Action minutes are consumed.
+on:
+  workflow_run:
+    workflows: [ 'CI/CD' ]   # must match the workflow name as stored by GitHub (leading/trailing whitespace is trimmed)
+    types: [ completed ]
+
+# Dispatching the CreateRelease workflow requires write access to actions.
+permissions:
+  actions: write
+  contents: read
+
+# Avoid overlapping release dispatches for the same source branch.
+concurrency:
+  group: tegos-release-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+env:
+  ALGO_SETTINGS_PATH: '.AL-Go/settings.json'
+  RELEASE_WORKFLOW: 'CreateRelease.yaml'
+
+jobs:
+  create-release:
+    name: Create release
+    # Only continue when the CICD build actually succeeded.
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout build commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Check out exactly the commit that the CICD build ran on.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Determine release version from app.json
+        id: version
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const settingsPath = process.env.ALGO_SETTINGS_PATH;
+
+            // Resolve the app folder from the AL-Go settings so this workflow
+            // works across repos with different folder structures.
+            core.info(`Reading AL-Go settings from '${settingsPath}'...`);
+            if (!fs.existsSync(settingsPath)) {
+              core.setFailed(`AL-Go settings not found at '${settingsPath}'.`);
+              return;
+            }
+
+            let settings;
+            try {
+              settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+            } catch (err) {
+              core.setFailed(`Failed to parse '${settingsPath}': ${err.message}`);
+              return;
+            }
+
+            const appFolders = settings.appFolders;
+            if (!Array.isArray(appFolders) || appFolders.length === 0) {
+              core.setFailed(`'appFolders' is missing or empty in '${settingsPath}'.`);
+              return;
+            }
+
+            const appFolder = appFolders[0];
+            const appJsonPath = path.join(appFolder, 'app.json');
+            core.info(`Using app folder '${appFolder}' -> '${appJsonPath}'`);
+
+            if (!fs.existsSync(appJsonPath)) {
+              core.setFailed(`app.json not found at '${appJsonPath}'.`);
+              return;
+            }
+
+            let appJson;
+            try {
+              appJson = JSON.parse(fs.readFileSync(appJsonPath, 'utf8'));
+            } catch (err) {
+              core.setFailed(`Failed to parse '${appJsonPath}': ${err.message}`);
+              return;
+            }
+
+            const fullVersion = appJson.version;
+            core.info(`Full version in app.json: '${fullVersion}'`);
+
+            const match = /^(\d+)\.(\d+)\.(\d+)/.exec(fullVersion || '');
+            if (!match) {
+              core.setFailed(`Version '${fullVersion}' is not in the expected Major.Minor.Build[.Revision] format.`);
+              return;
+            }
+
+            const tag = `${match[1]}.${match[2]}.${match[3]}`;
+            const releaseName = `V${tag}`;
+
+            core.info(`Release tag : ${tag}`);
+            core.info(`Release name: ${releaseName}`);
+
+            core.setOutput('tag', tag);
+            core.setOutput('releaseName', releaseName);
+
+            await core.summary
+              .addHeading('Release version', 2)
+              .addTable([
+                [{ data: 'Property', header: true }, { data: 'Value', header: true }],
+                ['app.json version', String(fullVersion)],
+                ['Release tag', tag],
+                ['Release name', releaseName],
+              ])
+              .write();
+
+      - name: Trigger CreateRelease
+        uses: actions/github-script@v7
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_NAME: ${{ steps.version.outputs.releaseName }}
+          TARGET_REF: ${{ github.event.workflow_run.head_branch }}
+        with:
+          script: |
+            const workflowId = process.env.RELEASE_WORKFLOW;
+            const ref = process.env.TARGET_REF;
+            const tag = process.env.RELEASE_TAG;
+            const name = process.env.RELEASE_NAME;
+
+            if (!tag || !name) {
+              core.setFailed(`Missing release version inputs (tag='${tag}', name='${name}').`);
+              return;
+            }
+
+            core.info(`Dispatching '${workflowId}' | tag='${tag}' name='${name}' ref='${ref}'`);
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: workflowId,
+              ref,
+              inputs: {
+                buildVersion: 'latest',
+                name,
+                tag,
+                releaseType: 'Release',
+                createReleaseBranch: 'false',
+                releaseBranchPrefix: 'release/',
+                updateVersionNumber: '+0.1',
+                skipUpdatingDependencies: 'false',
+                directCommit: 'true',
+                useGhTokenWorkflow: 'true',
+              },
+            });
+
+            core.info(`'${workflowId}' dispatched successfully.`);
+            await core.summary
+              .addHeading('Release dispatched', 2)
+              .addTable([
+                [{ data: 'Property', header: true }, { data: 'Value', header: true }],
+                ['Source branch', ref],
+                ['Release tag', tag],
+                ['Release name', name],
+                ['Create release branch', 'no'],
+                ['Version bump (main)', '+0.1 (minor)'],
+              ])
+              .write();
