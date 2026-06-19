@@ -119,13 +119,13 @@ jobs:
             const fullVersion = appJson.version;
             core.info(`Full version in app.json: '${fullVersion}'`);
 
-            const match = /^(\d+)\.(\d+)\.(\d+)/.exec(fullVersion || '');
+            const match = /^(\d+)\.(\d+)/.exec(fullVersion || '');
             if (!match) {
-              core.setFailed(`Version '${fullVersion}' is not in the expected Major.Minor.Build[.Revision] format.`);
+              core.setFailed(`Version '${fullVersion}' is not in the expected Major.Minor[.Build][.Revision] format.`);
               return;
             }
 
-            const tag = `${match[1]}.${match[2]}.${match[3]}`;
+            const tag = `${match[1]}.${match[2]}`;
             const releaseName = `V${tag}`;
 
             core.info(`Release tag : ${tag}`);
