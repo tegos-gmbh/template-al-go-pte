@@ -54,3 +54,4 @@ jobs:
     secrets: inherit
     with:
       caller: ${{ github.workflow }}
+      directCommit: true
