@@ -177,7 +177,7 @@ jobs:
                 createReleaseBranch: 'false',
                 releaseBranchPrefix: 'release/',
                 updateVersionNumber: '+0.1',
-                skipUpdatingDependencies: 'false',
+                skipUpdatingDependencies: 'true',
                 directCommit: 'true',
                 useGhTokenWorkflow: 'true',
               },
