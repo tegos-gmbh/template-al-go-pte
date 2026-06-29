@@ -1,0 +1,230 @@
+name: Tegos - Rebuild Release Notes
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  check-pages:
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check GitHub Pages configuration
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if build_type=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type' 2>/dev/null); then
+            if [ "${build_type}" = "workflow" ]; then
+              echo "GitHub Pages ist korrekt konfiguriert (Source: GitHub Actions)."
+              echo "enabled=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::notice::GitHub Pages-Quelle ist '${build_type}', erwartet wird 'workflow' (Settings -> Pages -> Source: GitHub Actions). Changelog-Build wird uebersprungen."
+              echo "enabled=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::notice::GitHub Pages ist fuer dieses Repository nicht aktiviert. Changelog-Build wird uebersprungen."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  rebuild-release-notes:
+    needs: check-pages
+    if: needs.check-pages.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild all release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p docs
+          rm -rf docs/releases
+
+          gh release list \
+            --limit 1000 \
+            --json tagName,name,publishedAt \
+            --jq 'sort_by(.publishedAt)' \
+            > releases.json
+
+          python3 <<'PY'
+          import json
+          import re
+          import subprocess
+          from pathlib import Path
+
+          releases = json.loads(Path("releases.json").read_text(encoding="utf-8"))
+
+          def run_json(cmd):
+              result = subprocess.run(cmd, check=True, text=True, capture_output=True)
+              return json.loads(result.stdout)
+
+          def extract_release_notes(body):
+              if not body:
+                  return None
+
+              match = re.search(
+                  r"^## Release Notes\s*\n(?P<content>.*?)(?=^##\s|\Z)",
+                  body,
+                  flags=re.MULTILINE | re.DOTALL,
+              )
+
+              if not match:
+                  return None
+
+              content = match.group("content").strip()
+
+              ignored = {"keine", "none", "n/a", "-", ""}
+              if content.lower() in ignored:
+                  return None
+
+              return content
+
+          sections = []
+
+          for index, release in enumerate(releases):
+              tag = release["tagName"]
+              name = release.get("name") or tag
+
+              published = release["publishedAt"]
+              previous_published = releases[index - 1]["publishedAt"] if index > 0 else None
+
+              if previous_published:
+                  search = f"merged:>{previous_published} merged:<={published}"
+              else:
+                  search = f"merged:<={published}"
+
+              prs = run_json([
+                  "gh", "pr", "list",
+                  "--state", "merged",
+                  "--search", search,
+                  "--limit", "200",
+                  "--json", "body,mergedAt"
+              ])
+
+              entries = []
+
+              for pr in sorted(prs, key=lambda item: item.get("mergedAt") or ""):
+                  notes = extract_release_notes(pr.get("body") or "")
+                  if not notes:
+                      continue
+
+                  entries.append(notes)
+
+              if not entries:
+                  continue
+
+              sections.append(
+                  f"## {name}\n\n"
+                  + "\n\n".join(entries)
+              )
+
+          parts = []
+          if sections:
+              parts.append("\n\n".join(reversed(sections)))
+
+          # Historische Eintraege aus migrierter Datei anhaengen, falls vorhanden.
+          old = Path("docs/CHANGELOG.old.md")
+          if old.exists():
+              old_text = old.read_text(encoding="utf-8")
+              old_text = re.sub(r"\A---\n.*?\n---\n", "", old_text, flags=re.DOTALL).strip()
+              if old_text:
+                  parts.append(old_text)
+
+          content = "\n\n".join(parts) if parts else "Keine Release Notes vorhanden."
+
+          front_matter = "---\nlayout: changelog\ntitle: Changelog\n---\n\n"
+
+          Path("docs/CHANGELOG.md").write_text(
+              front_matter + content + "\n",
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Ensure minimal layout
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs/_layouts
+          # Minimal-Layout ohne Kopf/Fuss - zentriert, serifenlos.
+          cat > docs/_layouts/changelog.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="de">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>{{ page.title | default: "Changelog" }}</title>
+            <style>
+              :root { color-scheme: light dark; }
+              body {
+                font-family: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                line-height: 1.6;
+                max-width: 760px;
+                margin: 3rem auto;
+                padding: 0 1.25rem;
+                color: #1f2328;
+              }
+              h1, h2, h3 { line-height: 1.25; font-weight: 600; }
+              h2 { margin-top: 2.5rem; padding-bottom: .3rem; border-bottom: 1px solid #d0d7de; }
+              a { color: #0969da; }
+              code { background: #afb8c133; padding: .15em .35em; border-radius: 6px; }
+              @media (prefers-color-scheme: dark) {
+                body { color: #e6edf3; background: #0d1117; }
+                h2 { border-bottom-color: #30363d; }
+                a { color: #4493f8; }
+              }
+            </style>
+          </head>
+          <body>
+          {{ content }}
+          </body>
+          </html>
+          HTML
+
+      - name: Commit docs
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "docs: rebuild changelog"
+          file_pattern: docs/CHANGELOG.md
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./_site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
