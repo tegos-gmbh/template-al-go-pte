@@ -2,5 +2,14 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.0/.Modules/settings.schema.json",
   "type": "PTE",
   "templateUrl": "https://github.com/microsoft/AL-Go-PTE@main",
-  "templateSha": "28c060aecd801a24e69346bea0c3cb193f327183"
+  "templateSha": "28c060aecd801a24e69346bea0c3cb193f327183",
+  "customALGoFiles": {
+    "filesToInclude": [
+      {
+        "sourceFolder": ".github",
+        "filter": "pr-description-instructions.md",
+        "destinationFolder": ".github"
+      }
+    ]
+  }
 }
