@@ -4,5 +4,11 @@
             "path": ".AL-Go"
         }
     ],
-    "settings": {}
+    "settings": {
+        "github.copilot.chat.pullRequestDescriptionGeneration.instructions": [
+            {
+                "file": ".github/pr-description-instructions.md"
+            }
+        ]
+    }
 }
