@@ -54,6 +54,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: master
 
       - name: Rebuild all release notes
         env:
@@ -210,6 +211,7 @@ jobs:
         with:
           commit_message: "docs: rebuild changelog"
           file_pattern: docs/CHANGELOG.md
+          branch: master
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
