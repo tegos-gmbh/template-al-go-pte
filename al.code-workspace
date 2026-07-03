@@ -5,6 +5,8 @@
         }
     ],
     "settings": {
+        "githubPullRequests.createDefaultBaseBranch": "repositoryDefault",
+        "githubPullRequests.pullRequestDescription": "Copilot",
         "github.copilot.chat.pullRequestDescriptionGeneration.instructions": [
             {
                 "file": ".github/pr-description-instructions.md"
