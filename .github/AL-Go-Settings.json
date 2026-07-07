@@ -1,8 +1,8 @@
 {
-  "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.0/.Modules/settings.schema.json",
+  "$schema": "https://raw.githubusercontent.com/microsoft/AL-Go-Actions/v9.1/.Modules/settings.schema.json",
   "type": "PTE",
   "templateUrl": "https://github.com/microsoft/AL-Go-PTE@main",
-  "templateSha": "28c060aecd801a24e69346bea0c3cb193f327183",
+  "templateSha": "a3877dcad8a18d304995e52367f0e0b54d35f534",
   "customALGoFiles": {
     "filesToInclude": [
       {
