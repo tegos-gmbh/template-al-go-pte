@@ -1,0 +1,197 @@
+name: 'Integration Test Report'
+
+# Companion workflow for consultant-driven integration test builds.
+#
+# The tegos-project-automation bot creates an integration branch
+# (feature/itb-<primaryIssue>-<runId>), merges the selected test branches,
+# commits `.itb/<runId>.json` and dispatches the AL-Go `CICD.yaml` on that
+# branch. This workflow runs once that CI/CD run completes and:
+#   - on success: attaches ONLY the changed apps as an artifact and comments a
+#     download link on the primary issue, cross-links the other test issues.
+#   - on failure: comments the failure on the primary issue and @-mentions the
+#     test assignee + the last task developer.
+# Finally it deletes the integration branch.
+#
+# Requires two secrets pointing at the same GitHub App used by the automation
+# (permissions: Contents RW, Issues RW, Actions R):
+#   ITB_APP_ID, ITB_APP_PRIVATE_KEY
+
+on:
+  workflow_run:
+    workflows: ["CI/CD"]
+    types: [completed]
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: itb-report-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    if: startsWith(github.event.workflow_run.head_branch, 'feature/itb-')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ITB_APP_ID }}
+          private-key: ${{ secrets.ITB_APP_PRIVATE_KEY }}
+
+      - name: Checkout integration branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_branch }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Read build metadata
+        id: meta
+        shell: pwsh
+        run: |
+          $file = Get-ChildItem -Path .itb -Filter *.json -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $file) {
+            Write-Host "No .itb metadata file found on branch."
+            "found=false" | Out-File $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          $m = Get-Content $file.FullName -Raw | ConvertFrom-Json
+          "found=true"                              | Out-File $env:GITHUB_OUTPUT -Append
+          "primary=$($m.primaryIssue)"              | Out-File $env:GITHUB_OUTPUT -Append
+          "others=$(($m.otherIssues)   -join ',')"  | Out-File $env:GITHUB_OUTPUT -Append
+          "handles=$(($m.notifyHandles) -join ',')" | Out-File $env:GITHUB_OUTPUT -Append
+
+      - name: Report build failure
+        if: steps.meta.outputs.found == 'true' && github.event.workflow_run.conclusion != 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          PRIMARY: ${{ steps.meta.outputs.primary }}
+          HANDLES: ${{ steps.meta.outputs.handles }}
+          REPO: ${{ github.repository }}
+        shell: pwsh
+        run: |
+          $mentions = ($env:HANDLES.Split(',', [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { "@$_" }) -join ' '
+          $body = @"
+          ❌ **Integrations-Testbuild fehlgeschlagen**
+
+          Der CI-Build ist mit dem Ergebnis ``$($env:CONCLUSION)`` beendet worden.
+
+          Run-Details: $($env:RUN_URL)
+
+          $mentions
+          "@
+          gh issue comment $env:PRIMARY --repo $env:REPO --body $body
+
+      - name: Determine changed apps
+        id: changed
+        if: steps.meta.outputs.found == 'true' && github.event.workflow_run.conclusion == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: pwsh
+        run: |
+          git fetch origin master --quiet
+          $changedFiles = git diff --name-only FETCH_HEAD...HEAD | Where-Object { $_ -and ($_ -notlike '.itb/*') }
+          if (-not $changedFiles) {
+            Write-Host "No changes vs master (outside .itb/)."
+            "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+
+          # Map changed files to AL apps via the nearest app.json (name + publisher).
+          $appJsons = Get-ChildItem -Recurse -Filter app.json |
+            Where-Object { $_.FullName -notmatch '[\\/](\.alpackages|\.snapshots|\.buildartifacts|_build)[\\/]' }
+          $repoRoot = (Get-Location).Path
+          $changedApps = @()
+          foreach ($aj in $appJsons) {
+            $folder = (Split-Path $aj.FullName -Parent).Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
+            $prefix = if ($folder) { "$folder/" } else { "" }
+            $touched = $changedFiles | Where-Object { $_ -like "$prefix*" }
+            if ($touched) {
+              $j = Get-Content $aj.FullName -Raw | ConvertFrom-Json
+              if ($j.name -and $j.publisher) {
+                $changedApps += [pscustomobject]@{ name = $j.name; publisher = $j.publisher }
+              }
+            }
+          }
+          $changedApps = $changedApps | Sort-Object name, publisher -Unique
+          if (-not $changedApps) {
+            Write-Host "No app.json matched the changed files."
+            "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+
+          # Download the CI/CD artifacts and keep only the changed apps' .app files.
+          New-Item -ItemType Directory -Force -Path changed-apps | Out-Null
+          gh run download $env:RUN_ID --dir _artifacts 2>$null
+          $appFiles = Get-ChildItem -Path _artifacts -Recurse -Filter *.app -ErrorAction SilentlyContinue
+          $kept = @()
+          foreach ($f in $appFiles) {
+            foreach ($ca in $changedApps) {
+              $needle = "{0}_{1}_" -f $ca.publisher, $ca.name
+              if ($f.Name -like "*$needle*") {
+                Copy-Item $f.FullName -Destination changed-apps -Force
+                $kept += $f.Name
+                break
+              }
+            }
+          }
+          $kept = $kept | Sort-Object -Unique
+          if (-not $kept) {
+            Write-Host "No matching .app artifacts for the changed apps."
+            "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
+            exit 0
+          }
+          ($changedApps | ForEach-Object { "- {0} ({1})" -f $_.name, $_.publisher }) -join "`n" | Set-Content changed-apps/_apps.md
+          "has_apps=true" | Out-File $env:GITHUB_OUTPUT -Append
+
+      - name: Upload changed apps
+        id: upload
+        if: steps.changed.outputs.has_apps == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: TestApp-${{ steps.meta.outputs.primary }}
+          path: changed-apps/*.app
+          if-no-files-found: error
+
+      - name: Comment app link and cross-link
+        if: steps.changed.outputs.has_apps == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PRIMARY: ${{ steps.meta.outputs.primary }}
+          OTHERS: ${{ steps.meta.outputs.others }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: pwsh
+        run: |
+          $appList = if (Test-Path changed-apps/_apps.md) { Get-Content changed-apps/_apps.md -Raw } else { "" }
+          $body = @"
+          ✅ **Test-App bereit**
+
+          Geänderte Apps in diesem Integrations-Build:
+          $appList
+
+          📦 Download (Artefakt ``TestApp-$($env:PRIMARY)``): $($env:RUN_URL)
+          "@
+          $commentUrl = gh issue comment $env:PRIMARY --repo $env:REPO --body $body
+          Write-Host "Primary comment: $commentUrl"
+
+          foreach ($o in $env:OTHERS.Split(',', [StringSplitOptions]::RemoveEmptyEntries)) {
+            $refBody = "🔗 Diese Test-App wurde gemeinsam mit weiteren Tests gebaut. Download & Details siehe: $commentUrl"
+            gh issue comment $o --repo $env:REPO --body $refBody
+          }
+
+      - name: Delete integration branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        shell: pwsh
+        run: |
+          git push origin --delete $env:HEAD_BRANCH 2>$null
+          exit 0
