@@ -18,7 +18,9 @@ name: 'Integration Test Report'
 
 on:
   workflow_run:
-    workflows: ["CI/CD"]
+    # AL-Go's CI/CD workflow is named ' CI/CD' (with a leading space). Match both
+    # the current quirky name and a future cleaned-up "CI/CD" to stay robust.
+    workflows: [" CI/CD", "CI/CD"]
     types: [completed]
 
 permissions:
@@ -95,46 +97,26 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id }}
         shell: pwsh
         run: |
-          git fetch origin master --quiet
-          $changedFiles = git diff --name-only FETCH_HEAD...HEAD | Where-Object { $_ -and ($_ -notlike '.itb/*') }
-          if (-not $changedFiles) {
-            Write-Host "No changes vs master (outside .itb/)."
+          # The bot recorded the marked test apps (name + publisher) in the
+          # metadata file, so we select exactly those – no git diff needed.
+          $file = Get-ChildItem -Path .itb -Filter *.json | Select-Object -First 1
+          $changedApps = @((Get-Content $file.FullName -Raw | ConvertFrom-Json).apps)
+          if (-not $changedApps -or $changedApps.Count -eq 0) {
+            Write-Host "No apps recorded in metadata."
             "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
             exit 0
           }
 
-          # Map changed files to AL apps via the nearest app.json (name + publisher).
-          $appJsons = Get-ChildItem -Recurse -Filter app.json |
-            Where-Object { $_.FullName -notmatch '[\\/](\.alpackages|\.snapshots|\.buildartifacts|_build)[\\/]' }
-          $repoRoot = (Get-Location).Path
-          $changedApps = @()
-          foreach ($aj in $appJsons) {
-            $folder = (Split-Path $aj.FullName -Parent).Substring($repoRoot.Length).TrimStart('\', '/') -replace '\\', '/'
-            $prefix = if ($folder) { "$folder/" } else { "" }
-            $touched = $changedFiles | Where-Object { $_ -like "$prefix*" }
-            if ($touched) {
-              $j = Get-Content $aj.FullName -Raw | ConvertFrom-Json
-              if ($j.name -and $j.publisher) {
-                $changedApps += [pscustomobject]@{ name = $j.name; publisher = $j.publisher }
-              }
-            }
-          }
-          $changedApps = $changedApps | Sort-Object name, publisher -Unique
-          if (-not $changedApps) {
-            Write-Host "No app.json matched the changed files."
-            "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
-            exit 0
-          }
-
-          # Download the CI/CD artifacts and keep only the changed apps' .app files.
+          # Download the CI/CD artifacts and keep only the recorded apps' .app files.
           New-Item -ItemType Directory -Force -Path changed-apps | Out-Null
           gh run download $env:RUN_ID --dir _artifacts 2>$null
           $appFiles = Get-ChildItem -Path _artifacts -Recurse -Filter *.app -ErrorAction SilentlyContinue
           $kept = @()
           foreach ($f in $appFiles) {
             foreach ($ca in $changedApps) {
+              # Literal match on "<publisher>_<name>_" against the .app filename.
               $needle = "{0}_{1}_" -f $ca.publisher, $ca.name
-              if ($f.Name -like "*$needle*") {
+              if ($f.Name.Contains($needle)) {
                 Copy-Item $f.FullName -Destination changed-apps -Force
                 $kept += $f.Name
                 break
@@ -143,7 +125,7 @@ jobs:
           }
           $kept = $kept | Sort-Object -Unique
           if (-not $kept) {
-            Write-Host "No matching .app artifacts for the changed apps."
+            Write-Host "No matching .app artifacts for the recorded apps."
             "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
             exit 0
           }
