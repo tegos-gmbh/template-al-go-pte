@@ -9,6 +9,11 @@
         "sourceFolder": ".github",
         "filter": "pr-description-instructions.md",
         "destinationFolder": ".github"
+      },
+      {
+        "sourceFolder": ".github",
+        "filter": "copilot-instructions.md",
+        "destinationFolder": ".github"
       }
     ]
   }
