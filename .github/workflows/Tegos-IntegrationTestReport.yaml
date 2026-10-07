@@ -3,7 +3,7 @@ name: 'Integration Test Report'
 # Companion workflow for consultant-driven integration test builds.
 #
 # The tegos-project-automation bot creates an integration branch
-# (feature/itb-<primaryIssue>-<runId>), merges the selected test branches,
+# (test-branch/itb-<primaryIssue>-<runId>), merges the selected test branches,
 # commits `.itb/<runId>.json` and dispatches the AL-Go `CICD.yaml` on that
 # branch. This workflow runs once that CI/CD run completes and:
 #   - on success: attaches ONLY the changed apps as an artifact and comments a
