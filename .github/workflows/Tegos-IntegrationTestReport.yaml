@@ -268,6 +268,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO_NAME: ${{ github.event.repository.name }}
         shell: pwsh
         run: |
           # The bot recorded the marked test apps (name + publisher) in the
@@ -285,13 +286,18 @@ jobs:
           gh run download $env:RUN_ID --dir _artifacts 2>$null
           $appFiles = Get-ChildItem -Path _artifacts -Recurse -Filter *.app -ErrorAction SilentlyContinue
           $kept = @()
+          $versions = @()
           foreach ($f in $appFiles) {
             foreach ($ca in $changedApps) {
               # Literal match on "<publisher>_<name>_" against the .app filename.
               $needle = "{0}_{1}_" -f $ca.publisher, $ca.name
-              if ($f.Name.Contains($needle)) {
+              $matchIndex = $f.BaseName.IndexOf($needle, [StringComparison]::Ordinal)
+              if ($matchIndex -ge 0) {
+                $version = $f.BaseName.Substring($matchIndex + $needle.Length)
+                if ([string]::IsNullOrWhiteSpace($version)) { continue }
                 Copy-Item $f.FullName -Destination changed-apps -Force
                 $kept += $f.Name
+                $versions += $version
                 break
               }
             }
@@ -302,15 +308,18 @@ jobs:
             "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
             exit 0
           }
+          $versionComponent = ($versions | Sort-Object -Unique) -join '+'
+          $artifactName = "$($env:REPO_NAME)-Testapp-$versionComponent"
           ($changedApps | ForEach-Object { "- {0} ({1})" -f $_.name, $_.publisher }) -join "`n" | Set-Content changed-apps/_apps.md
           "has_apps=true" | Out-File $env:GITHUB_OUTPUT -Append
+          "artifact_name=$artifactName" | Out-File $env:GITHUB_OUTPUT -Append
 
       - name: Upload changed apps
         id: upload
         if: steps.changed.outputs.has_apps == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: TestApp-${{ steps.meta.outputs.primary }}
+          name: ${{ steps.changed.outputs.artifact_name }}
           path: changed-apps/*.app
           if-no-files-found: error
 
@@ -322,6 +331,7 @@ jobs:
           OTHERS: ${{ steps.meta.outputs.others }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ARTIFACT_NAME: ${{ steps.changed.outputs.artifact_name }}
         shell: pwsh
         run: |
           $appList = if (Test-Path changed-apps/_apps.md) { Get-Content changed-apps/_apps.md -Raw } else { "" }
@@ -331,7 +341,7 @@ jobs:
           Geänderte Apps in diesem Integrations-Build:
           $appList
 
-          📦 Download (Artefakt ``TestApp-$($env:PRIMARY)``): $($env:RUN_URL)
+          📦 Download (Artefakt ``$($env:ARTIFACT_NAME)``): $($env:RUN_URL)
           "@
           $commentUrl = gh issue comment $env:PRIMARY --repo $env:REPO --body $body
           Write-Host "Primary comment: $commentUrl"
