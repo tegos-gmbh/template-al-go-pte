@@ -2,10 +2,11 @@ name: 'Integration Test Report'
 
 # Companion workflow for consultant-driven integration test builds.
 #
-# The tegos-project-automation bot creates an integration branch
-# (test-branch/itb-<primaryIssue>-<runId>), merges the selected test branches,
-# commits `.itb/<runId>.json` and dispatches the AL-Go `CICD.yaml` on that
-# branch. This workflow runs once that CI/CD run completes and:
+# The tegos-project-automation bot dispatches this workflow on the default
+# branch. The prepare job creates an integration branch, sequentially merges
+# all selected branches, resolves eligible XLIFF-only conflicts by textual
+# union, marks changed apps, commits metadata, and dispatches `CICD.yaml` once.
+# The report job runs once that CI/CD run completes and:
 #   - on success: attaches ONLY the changed apps as an artifact and comments a
 #     download link on the primary issue, cross-links the other test issues.
 #   - on failure: comments the failure on the primary issue and @-mentions the
@@ -13,10 +14,36 @@ name: 'Integration Test Report'
 # Finally it deletes the integration branch.
 #
 # Requires two secrets pointing at the same GitHub App used by the automation
-# (permissions: Contents RW, Issues RW, Actions R):
+# (permissions: Contents RW, Issues RW, Actions RW):
 #   ITB_APP_ID, ITB_APP_PRIVATE_KEY
 
 on:
+  workflow_dispatch:
+    inputs:
+      integration_branch:
+        description: Integration branch created by the automation
+        required: true
+        type: string
+      branches_json:
+        description: Ordered JSON array of development branches
+        required: true
+        type: string
+      metadata_json:
+        description: JSON metadata written to the integration branch
+        required: true
+        type: string
+      test_numbers_json:
+        description: JSON array of test issue numbers
+        required: true
+        type: string
+      default_branch:
+        description: Repository default branch
+        required: true
+        type: string
+      eta_minutes:
+        description: Estimated CI duration in minutes
+        required: true
+        type: string
   workflow_run:
     # AL-Go's CI/CD workflow is named ' CI/CD' (with a leading space). Match both
     # the current quirky name and a future cleaned-up "CI/CD" to stay robust.
@@ -25,15 +52,161 @@ on:
 
 permissions:
   contents: write
-  actions: read
+  issues: write
+  actions: write
 
 concurrency:
-  group: itb-report-${{ github.event.workflow_run.head_branch }}
+  group: itb-${{ github.event_name == 'workflow_dispatch' && inputs.integration_branch || github.event.workflow_run.head_branch }}
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ITB_APP_ID }}
+          private-key: ${{ secrets.ITB_APP_PRIVATE_KEY }}
+
+      - name: Checkout default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.default_branch }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Prepare integration branch
+        id: prepare
+        continue-on-error: true
+        env:
+          INTEGRATION_BRANCH: ${{ inputs.integration_branch }}
+          BRANCHES_JSON: ${{ inputs.branches_json }}
+          METADATA_JSON: ${{ inputs.metadata_json }}
+          TEST_NUMBERS_JSON: ${{ inputs.test_numbers_json }}
+          DEFAULT_BRANCH: ${{ inputs.default_branch }}
+          RESULT_PATH: ${{ runner.temp }}/itb-prepare-result.json
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File .github/scripts/Prepare-IntegrationTestBuild.ps1 `
+            -IntegrationBranch $env:INTEGRATION_BRANCH `
+            -BranchesJson $env:BRANCHES_JSON `
+            -MetadataJson $env:METADATA_JSON `
+            -TestNumbersJson $env:TEST_NUMBERS_JSON `
+            -DefaultBranch $env:DEFAULT_BRANCH `
+            -ResultPath $env:RESULT_PATH
+          $scriptExit = $LASTEXITCODE
+          if (Test-Path -LiteralPath $env:RESULT_PATH) {
+            $result = Get-Content -LiteralPath $env:RESULT_PATH -Raw | ConvertFrom-Json
+            "status=$($result.status)" | Out-File $env:GITHUB_OUTPUT -Append
+          }
+          exit $scriptExit
+
+      - name: Report preparation failure
+        if: steps.prepare.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RESULT_PATH: ${{ runner.temp }}/itb-prepare-result.json
+          METADATA_JSON: ${{ inputs.metadata_json }}
+          INTEGRATION_BRANCH: ${{ inputs.integration_branch }}
+          REPO: ${{ github.repository }}
+        shell: pwsh
+        run: |
+          $metadata = $env:METADATA_JSON | ConvertFrom-Json
+          $result = if (Test-Path -LiteralPath $env:RESULT_PATH) {
+            Get-Content -LiteralPath $env:RESULT_PATH -Raw | ConvertFrom-Json
+          } else {
+            [pscustomobject]@{ message = 'Unbekannter Vorbereitungsfehler'; conflictBranch = ''; conflictFiles = @() }
+          }
+          $failedBranch = if ($result.conflictBranch) { [string]$result.conflictBranch } else { $env:INTEGRATION_BRANCH }
+          $failedBranch = $failedBranch -replace '[\r\n`]', '_'
+          $message = ([string]$result.message -replace '[\r\n]', ' ').Replace('`', "'")
+          if ($message.Length -gt 1000) { $message = $message.Substring(0, 1000) }
+          $mentions = @($metadata.notifyHandles |
+            Where-Object { $_ -match '^[A-Za-z0-9-]+$' } |
+            ForEach-Object { "@$_" }) -join ' '
+          $files = @($result.conflictFiles | ForEach-Object { ([string]$_ -replace '[\r\n`]', '_') })
+          $fileLines = if ($files.Count -gt 0) {
+            "`n`nKonfliktdateien:`n" + (($files | ForEach-Object { "- ``$_``" }) -join "`n")
+          } else { '' }
+          $body = @"
+          ❌ **Integrations-Branch konnte nicht erstellt werden**
+
+          Der Branch ``$failedBranch`` konnte nicht in den Integrations-Branch zusammengeführt werden.
+          Meldung: $message$fileLines
+
+          Es wurde kein CI/CD-Build gestartet. Bitte den Konflikt manuell auflösen und den Testbuild erneut anstoßen.
+
+          $mentions
+          "@
+          gh issue comment $metadata.primaryIssue --repo $env:REPO --body $body
+
+      - name: Report ETA and dispatch CI/CD
+        id: dispatch
+        if: steps.prepare.outcome == 'success' && steps.prepare.outputs.status == 'prepared'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          METADATA_JSON: ${{ inputs.metadata_json }}
+          BRANCHES_JSON: ${{ inputs.branches_json }}
+          ETA_MINUTES: ${{ inputs.eta_minutes }}
+          INTEGRATION_BRANCH: ${{ inputs.integration_branch }}
+          REPO: ${{ github.repository }}
+        shell: pwsh
+        run: |
+          $metadata = $env:METADATA_JSON | ConvertFrom-Json
+          $branches = @($env:BRANCHES_JSON | ConvertFrom-Json -NoEnumerate)
+          $displayBranches = @($branches | ForEach-Object { ([string]$_ -replace '[\r\n`]', '_') })
+          if ($env:ETA_MINUTES -notmatch '^[0-9]+$') { throw 'Invalid ETA.' }
+          $testList = @($metadata.primaryIssue) + @($metadata.otherIssues) | Sort-Object -Unique
+          $body = @"
+          🔧 **Integrations-Testbuild gestartet.**
+
+          Enthaltene Tests: $(($testList | ForEach-Object { "#$_" }) -join ', ')
+          Branches: $(($displayBranches | ForEach-Object { "``$_``" }) -join ', ')
+
+          ⏱️ Voraussichtliche Dauer: **~$($env:ETA_MINUTES) Min**. Die fertige App wird anschließend hier verlinkt.
+          "@
+          gh issue comment $metadata.primaryIssue --repo $env:REPO --body $body
+          gh api "repos/$($env:REPO)/actions/workflows/CICD.yaml/dispatches" `
+            --method POST --field "ref=$($env:INTEGRATION_BRANCH)" | Out-Null
+
+      - name: Report CI/CD dispatch failure
+        if: steps.dispatch.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          METADATA_JSON: ${{ inputs.metadata_json }}
+          INTEGRATION_BRANCH: ${{ inputs.integration_branch }}
+          REPO: ${{ github.repository }}
+        shell: pwsh
+        run: |
+          $metadata = $env:METADATA_JSON | ConvertFrom-Json
+          $mentions = @($metadata.notifyHandles |
+            Where-Object { $_ -match '^[A-Za-z0-9-]+$' } |
+            ForEach-Object { "@$_" }) -join ' '
+          $body = @"
+          ❌ **Integrations-Testbuild konnte nicht gestartet werden**
+
+          Der vorbereitete Integrations-Branch ``$($env:INTEGRATION_BRANCH)`` konnte nicht an ``CICD.yaml`` übergeben werden und wird gelöscht.
+
+          $mentions
+          "@
+          gh issue comment $metadata.primaryIssue --repo $env:REPO --body $body
+
+      - name: Clean up failed preparation
+        if: always() && (steps.prepare.outcome == 'failure' || steps.dispatch.outcome == 'failure')
+        env:
+          INTEGRATION_BRANCH: ${{ inputs.integration_branch }}
+        shell: pwsh
+        run: |
+          if ($env:INTEGRATION_BRANCH -match '^test-branch/itb-[0-9]+-[0-9]+$') {
+            git push origin --delete $env:INTEGRATION_BRANCH 2>$null
+          }
+          exit 0
+
   report:
-    if: startsWith(github.event.workflow_run.head_branch, 'test-branch/itb-')
+    if: github.event_name == 'workflow_run' && startsWith(github.event.workflow_run.head_branch, 'test-branch/itb-')
     runs-on: ubuntu-latest
     steps:
       - name: Generate GitHub App token
@@ -95,7 +268,6 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RUN_ID: ${{ github.event.workflow_run.id }}
-          REPO_NAME: ${{ github.event.repository.name }}
         shell: pwsh
         run: |
           # The bot recorded the marked test apps (name + publisher) in the
@@ -113,19 +285,15 @@ jobs:
           gh run download $env:RUN_ID --dir _artifacts 2>$null
           $appFiles = Get-ChildItem -Path _artifacts -Recurse -Filter *.app -ErrorAction SilentlyContinue
           $kept = @()
-          $versions = @()
           foreach ($f in $appFiles) {
             foreach ($ca in $changedApps) {
               # Literal match on "<publisher>_<name>_" against the .app filename.
               $needle = "{0}_{1}_" -f $ca.publisher, $ca.name
-              $matchIndex = $f.BaseName.IndexOf($needle, [StringComparison]::Ordinal)
-              if ($matchIndex -lt 0) { continue }
-              $version = $f.BaseName.Substring($matchIndex + $needle.Length)
-              if ([String]::IsNullOrEmpty($version)) { continue }
-              Copy-Item $f.FullName -Destination changed-apps -Force
-              $kept += $f.Name
-              $versions += $version
-              break
+              if ($f.Name.Contains($needle)) {
+                Copy-Item $f.FullName -Destination changed-apps -Force
+                $kept += $f.Name
+                break
+              }
             }
           }
           $kept = $kept | Sort-Object -Unique
@@ -134,18 +302,15 @@ jobs:
             "has_apps=false" | Out-File $env:GITHUB_OUTPUT -Append
             exit 0
           }
-          $versionComponent = ($versions | Sort-Object -Unique) -join '+'
-          $artifactName = "$($env:REPO_NAME)-Testapp-$versionComponent"
           ($changedApps | ForEach-Object { "- {0} ({1})" -f $_.name, $_.publisher }) -join "`n" | Set-Content changed-apps/_apps.md
           "has_apps=true" | Out-File $env:GITHUB_OUTPUT -Append
-          "artifact_name=$artifactName" | Out-File $env:GITHUB_OUTPUT -Append
 
       - name: Upload changed apps
         id: upload
         if: steps.changed.outputs.has_apps == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.changed.outputs.artifact_name }}
+          name: TestApp-${{ steps.meta.outputs.primary }}
           path: changed-apps/*.app
           if-no-files-found: error
 
@@ -155,7 +320,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PRIMARY: ${{ steps.meta.outputs.primary }}
           OTHERS: ${{ steps.meta.outputs.others }}
-          ARTIFACT_NAME: ${{ steps.changed.outputs.artifact_name }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         shell: pwsh
@@ -167,7 +331,7 @@ jobs:
           Geänderte Apps in diesem Integrations-Build:
           $appList
 
-          📦 Download (Artefakt ``$($env:ARTIFACT_NAME)``): $($env:RUN_URL)
+          📦 Download (Artefakt ``TestApp-$($env:PRIMARY)``): $($env:RUN_URL)
           "@
           $commentUrl = gh issue comment $env:PRIMARY --repo $env:REPO --body $body
           Write-Host "Primary comment: $commentUrl"
