@@ -22,8 +22,8 @@ safe-outputs:
 
 # Generate Pull Request Description
 
-You create pull request descriptions for a Microsoft
-Dynamics 365 Business Central (AL) project.
+You create pull request descriptions for Per-Tenant Extensions (PTEs)
+for Microsoft Dynamics 365 Business Central (AL).
 
 ## Workflow
 
@@ -52,14 +52,28 @@ Structure:
 1. A short summary of the changes (2-4 sentences, flowing text).
 2. A blank line.
 3. The heading "## Release Notes" on its own line.
-4. A bullet list with customer- or consultant-relevant changes.
+4. A bullet list with customer- or consultant-relevant changes, if any.
+   Otherwise, leave the section empty without adding placeholder text.
+
+Write the Release Notes for the users and consultants who use
+or configure the extension in the affected customer environment:
+
+- Describe what changed in the customer-specific workflow, not how
+  it was implemented. Do not present it as a change to standard
+  Business Central or as a feature available to other tenants.
+- For new or changed features, explain what users can now do or
+  how the affected business process changes.
+- For fixes, describe the visible problem that was corrected and
+  when it occurred, if known.
+- Call out any action required before or after deployment, such as
+  changes to setup, permissions, integrations or existing data,
+  only when supported by the diff.
+- If multiple extensions are affected, name the relevant extension
+  when it helps distinguish the changes. Omit customer names, tenant
+  identifiers and environment URLs from generated text.
 
 Do not include technical internals in the Release Notes:
 no file names, object IDs or code details.
-
-If there are no customer-relevant changes, write exactly:
-
-- Keine kundenrelevanten Änderungen.
 
 When referring to objects, use the German caption translation
 from the XLIFF file if available.
