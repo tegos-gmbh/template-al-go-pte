@@ -1,0 +1,39 @@
+
+name: Copilot Code Review Setup
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-code-review.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download BCQuality
+        shell: bash
+        run: |
+          git clone --depth 1 \
+            https://github.com/microsoft/BCQuality.git \
+            /tmp/bcquality
+
+      - name: Build BCQuality Knowledge Index
+        shell: pwsh
+        run: |
+          & /tmp/bcquality/tools/Build-KnowledgeIndex.ps1
+
+      - name: Verify BCQuality
+        shell: bash
+        run: |
+          test -f /tmp/bcquality/skills/entry.md
+          test -f /tmp/bcquality/skills/al-code-review/SKILL.md
+          test -f /tmp/bcquality/knowledge-index.json
+
+          git -C /tmp/bcquality log -1 --oneline
+          echo "BCQuality is ready for code review."

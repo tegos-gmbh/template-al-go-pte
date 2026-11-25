@@ -1,0 +1,147 @@
+# Pattern: Enum + Interface with per-value Setup (`ISetupProvider`)
+
+Use this pattern whenever an **extensible enum is paired with an interface** and **one or
+more enum values need their own configuration/setup** (different fields per value). It keeps
+each value's setup self-contained while the host record only stores a single `Guid`.
+
+Reference implementation in `te365`:
+- Interface: `app/Src/Utility/TREBISetupProvider.Interface.al`
+- Default provider: `app/Src/Utility/TREBDefaultSetupProvider.Codeunit.al`
+- Example enum: `app/Src/AddressValidation/TREBAddrValidationProvider.Enum.al`
+- Example value impl: `app/Src/AddressValidation/AzureMapsImplementation/TREBAzureMapsAddrValidator.Codeunit.al`
+- Example consumers: `app/Src/Setup/TREBSetup.Page.al`, `TREBContactTemplateSteps.Page.al`
+
+## When to apply
+- A feature enum is `Extensible = true` and resolved to behaviour through a feature interface
+  (e.g. `IAddressValidator`, `IContactTemplateActionRunner`, `IStagingStepHandler`).
+- Individual enum values need persisted configuration before they can run.
+- Not every value needs setup — values without setup fall back to a no-op default.
+
+## Building blocks
+
+### 1. The `ISetupProvider` interface (one per feature area, reuse `TREB ISetupProvider` if it fits)
+```al
+interface "<Prefix> ISetupProvider"
+{
+    procedure HasSetup(SourceSystemId: Guid): Boolean;
+    procedure EditSetup(SourceSystemId: Guid);
+    procedure DeleteSetup(SourceSystemId: Guid): Boolean;
+}
+```
+
+### 2. A default (no-op) provider used as `DefaultImplementation`
+```al
+codeunit <id> "<Prefix> Default Setup Provider" implements "<Prefix> ISetupProvider"
+{
+    procedure HasSetup(SourceSystemId: Guid): Boolean
+    begin
+        exit(false);
+    end;
+
+    procedure EditSetup(SourceSystemId: Guid)
+    var
+        NoSetupErrorLbl: Label 'Not implemented.';
+    begin
+        Error(ErrorInfo.Create(NoSetupErrorLbl));
+    end;
+
+    procedure DeleteSetup(SourceSystemId: Guid): Boolean
+    begin
+        exit(false);
+    end;
+}
+```
+
+### 3. The feature enum implements BOTH interfaces and declares the default
+```al
+enum <id> "<Prefix> Addr. Validation Provider" implements "<Prefix> IAddressValidator", "<Prefix> ISetupProvider"
+{
+    Extensible = true;
+    DefaultImplementation = "<Prefix> ISetupProvider" = "<Prefix> Default Setup Provider";
+
+    value(0; AzureMaps)
+    {
+        Caption = 'Azure Maps';
+        Implementation = "<Prefix> IAddressValidator" = "<Prefix> Azure Maps Addr.Validator",
+                         "<Prefix> ISetupProvider" = "<Prefix> Azure Maps Addr.Validator";
+    }
+}
+```
+- Values that need setup point their `ISetupProvider` implementation at the **same codeunit**
+  that implements the feature interface (one codeunit implements both).
+- Values that need NO setup simply omit the `ISetupProvider` mapping and inherit the default.
+
+### 4. Each setup-requiring value: one setup Table + one setup Page
+- Table: keyed by a single `Guid` id field (e.g. `ID`/`Setup Id`), `Access = Internal`,
+  `DataClassification = CustomerContent`.
+- Page: `PageType = StandardDialog`, edits that table.
+
+### 5. The implementing codeunit implements both interfaces
+```al
+codeunit <id> "<Prefix> Azure Maps Addr.Validator" implements "<Prefix> IAddressValidator", "<Prefix> ISetupProvider"
+{
+    Access = Internal;
+
+    // ... feature interface methods read the setup record via the passed setup Guid ...
+
+    procedure HasSetup(SourceSystemId: Guid): Boolean
+    var
+        Setup: Record "<Prefix> Azure Maps Setup";
+    begin
+        exit(Setup.Get(SourceSystemId));
+    end;
+
+    procedure EditSetup(SourceSystemId: Guid)
+    var
+        Setup: Record "<Prefix> Azure Maps Setup";
+    begin
+        if not Setup.Get(SourceSystemId) then begin
+            Setup.Init();
+            Setup.ID := SourceSystemId;   // the Guid PK field
+            Setup.Insert();
+            Commit();                      // commit before RunModal
+        end;
+        Page.RunModal(Page::"<Prefix> Addr. Azure Maps Setup", Setup);
+    end;
+
+    procedure DeleteSetup(SourceSystemId: Guid): Boolean
+    var
+        Setup: Record "<Prefix> Azure Maps Setup";
+    begin
+        if Setup.Get(SourceSystemId) then
+            exit(Setup.Delete(true));
+    end;
+}
+```
+
+### 6. Host record stores the setup Guid
+The record that owns the selected enum value also stores a `Guid` field, e.g.
+`"Addr. Validation Setup Guid"` / `"Step Setup Guid"` / `"Env. Det. Setup Guid"`.
+This Guid is the `SourceSystemId` passed to all three procedures.
+
+## Consumption (call sites)
+Resolve the enum to the **feature** interface, then narrow to `ISetupProvider` defensively
+with `is` / `as` (so non-configurable values are handled cleanly):
+```al
+var
+    ActionRunner: Interface "<Prefix> IContactTemplateActionRunner";
+begin
+    ActionRunner := Rec.Action;                 // enum -> feature interface
+    if ActionRunner is "<Prefix> ISetupProvider" then
+        SetupTxt := (ActionRunner as "<Prefix> ISetupProvider").HasSetup(Rec."Step Setup Guid") ? ConfiguredLbl : NotConfLbl
+    else
+        SetupTxt := NotReqLbl;
+end;
+```
+- Edit (e.g. page field `OnDrillDown`): `(X as "<Prefix> ISetupProvider").EditSetup(Rec."... Setup Guid")` — `CurrPage.SaveRecord()` before, `CurrPage.Update()` after.
+- Delete (table `OnDelete` / value change triggers): guard with `is` then `DeleteSetup(Rec."... Setup Guid")` to clean up orphaned setup records.
+
+## Checklist when implementing
+1. Reuse an existing `ISetupProvider` interface if one fits; otherwise create one with the three procedures.
+2. Provide/point to a no-op `Default Setup Provider` and set it as `DefaultImplementation` on the enum.
+3. Enum `Extensible = true`, implements feature interface **and** `ISetupProvider`.
+4. For each value needing setup: create setup Table (Guid PK) + StandardDialog Page, and have the value's codeunit implement both interfaces.
+5. Implement `HasSetup` (= `Setup.Get`), `EditSetup` (lazy `Init`/`Insert`/`Commit` then `Page.RunModal`), `DeleteSetup` (= `Setup.Delete(true)`).
+6. Add a `Guid` setup field on the host record and pass it as `SourceSystemId`.
+7. Call sites use `is`/`as` narrowing; delete setup on record/value removal to avoid orphans.
+8. Apply the `mandatoryPrefix` from `AppSourceCop.json` to every new object and field.

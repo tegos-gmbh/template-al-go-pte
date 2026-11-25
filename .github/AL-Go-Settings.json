@@ -6,14 +6,24 @@
   "customALGoFiles": {
     "filesToInclude": [
       {
-        "sourceFolder": ".github",
-        "filter": "pr-description-instructions.md",
-        "destinationFolder": ".github"
+        "sourceFolder": ".github/workflows",
+        "filter": "pr-description.md"
       },
       {
-        "sourceFolder": ".github",
-        "filter": "copilot-instructions.md",
-        "destinationFolder": ".github"
+        "sourceFolder": ".github/skills/al-code-review",
+        "filter": "SKILL.md"
+      },
+      {
+        "sourceFolder": ".github/skills/setup-provider-review",
+        "filter": "SKILL.md"
+      },
+      {
+        "sourceFolder": ".github/skills/setup-provider-review",
+        "filter": "setup-provider-pattern.txt"
+      },
+      {
+        "sourceFolder": ".github/workflows",
+        "filter": "copilot-code-review.yml"
       }
     ]
   }

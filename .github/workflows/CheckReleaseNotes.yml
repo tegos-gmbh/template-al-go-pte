@@ -1,0 +1,63 @@
+
+name: Check Release Notes
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: release-notes-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check-release-notes:
+    name: Validate Release Notes
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate PR Description
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          $json = gh pr view $env:PR_NUMBER `
+            --repo $env:GITHUB_REPOSITORY `
+            --json body
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to retrieve PR description."
+          }
+
+          $body = [string](($json | ConvertFrom-Json).body)
+
+          $heading = [regex]::Match(
+              $body,
+              '(?m)^## Release Notes[ \t]*\r?$'
+          )
+
+          if (-not $heading.Success) {
+              throw "Missing required heading: ## Release Notes"
+          }
+
+          $releaseNotes = $body.Substring(
+              $heading.Index + $heading.Length
+          )
+
+          $releaseNotes = (
+              $releaseNotes -split '(?m)^#{1,2}[ \t]+', 2
+          )[0]
+
+          if ($releaseNotes -notmatch '(?m)^[ \t]*-[ \t]+\S') {
+              throw "Release Notes must contain at least one bullet point."
+          }
+
+          Write-Host "Release Notes validation passed."
