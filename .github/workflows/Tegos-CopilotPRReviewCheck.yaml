@@ -1,0 +1,55 @@
+name: Finalize AL-Go Copilot PR Review Check
+
+# A separate run also finalizes checks when the review runner itself is cancelled.
+on:
+  workflow_run:
+    workflows: [Copilot PR Review Runner]
+    types: [completed]
+
+permissions:
+  actions: read
+  checks: write
+
+jobs:
+  finalize:
+    if: github.event.workflow_run.event == 'workflow_run'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Complete PR review check
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_RUN_ID: ${{ github.event.workflow_run.id }}
+          REVIEW_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          REVIEW_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $repo = "repos/$env:GITHUB_REPOSITORY"
+          $prefix = "al-go-review-check-$env:REVIEW_RUN_ATTEMPT-"
+          $artifacts = @(gh api "$repo/actions/runs/$env:REVIEW_RUN_ID/artifacts?per_page=100" --paginate `
+            --jq ".artifacts[].name | select(startswith(`"$prefix`"))")
+          if ($artifacts.Count -eq 0) { return }
+          if ($artifacts.Count -ne 1 -or $artifacts[0] -cnotmatch "^$prefix([0-9a-f]{40})$") {
+            throw 'The review run has invalid or ambiguous check metadata.'
+          }
+
+          $headSha = $Matches[1]
+          $externalId = "al-go-review-$env:REVIEW_RUN_ID-$env:REVIEW_RUN_ATTEMPT"
+          $query = ".check_runs[] | select(.external_id == `"$externalId`" and .status != `"completed`") | .id"
+          $checkIds = @(gh api "$repo/commits/$headSha/check-runs?check_name=AL-Go%20Copilot%20Review&filter=all&per_page=100" `
+            --paginate --jq $query)
+          # The start job can be cancelled after recording the commit but before posting a check.
+          if ($checkIds.Count -eq 0) { return }
+          if ($checkIds.Count -ne 1 -or $checkIds[0] -notmatch '^[0-9]+$') {
+            throw 'The review run has invalid or ambiguous check IDs.'
+          }
+
+          $conclusion = switch ($env:REVIEW_RUN_CONCLUSION) {
+            'success' { 'success' }
+            'cancelled' { 'cancelled' }
+            'timed_out' { 'timed_out' }
+            default { 'failure' }
+          }
+          @{ conclusion = $conclusion } | ConvertTo-Json -Compress |
+            gh api --method PATCH "$repo/check-runs/$($checkIds[0])" --input - --silent

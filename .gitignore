@@ -19,3 +19,8 @@ rad.json
 .snapshots/
 cache_*
 ~$*
+
+# Local GitHub Agentic Workflows artifacts
+/aw/logs/
+/.github/aw/logs/
+/.github/aw/updates/

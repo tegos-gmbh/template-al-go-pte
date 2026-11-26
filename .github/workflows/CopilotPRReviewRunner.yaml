@@ -194,3 +194,67 @@ jobs:
           name: copilot-pr-review-final-${{ needs.prepare.outputs.prNumber }}
           path: ${{ github.workspace }}/review-output
           if-no-files-found: warn
+
+  CustomJobStartReviewCheck:
+    name: Start PR review check
+    needs: prepare
+    if: needs.prepare.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: write
+    env:
+      REVIEW_HEAD_SHA: ${{ needs.prepare.outputs.headSha }}
+      REVIEW_PR_NUMBER: ${{ needs.prepare.outputs.prNumber }}
+      REVIEW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+    steps:
+      - name: Record reviewed commit
+        run: |
+          if ($env:REVIEW_HEAD_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The review did not resolve a valid commit SHA.'
+          }
+          Set-Content -Path review-check.txt -Value $env:REVIEW_HEAD_SHA
+
+      # Record the commit before creating the check so cancellation cannot strand it without a lookup key.
+      - name: Register check for finalization
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: al-go-review-check-${{ github.run_attempt }}-${{ env.REVIEW_HEAD_SHA }}
+          path: review-check.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Mark review in progress
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          @{
+            name = 'AL-Go Copilot Review'
+            head_sha = $env:REVIEW_HEAD_SHA
+            status = 'in_progress'
+            external_id = "al-go-review-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            details_url = $env:REVIEW_RUN_URL
+          } | ConvertTo-Json -Compress | gh api --method POST "repos/$env:GITHUB_REPOSITORY/check-runs" --input - --silent
+
+      - name: Announce review start in the pull request
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          if ($env:REVIEW_PR_NUMBER -notmatch '^[1-9][0-9]*$') {
+            throw 'The review did not resolve a valid pull request number.'
+          }
+          $repo = "repos/$env:GITHUB_REPOSITORY"
+          $currentHead = gh api "$repo/pulls/$env:REVIEW_PR_NUMBER" --jq '.head.sha'
+          if ($currentHead -cne $env:REVIEW_HEAD_SHA) {
+            Write-Host 'Not posting a start comment: the pull request head changed.'
+            return
+          }
+          $shortSha = $env:REVIEW_HEAD_SHA.Substring(0, 7)
+          @{
+            body = ('**AL-Go Copilot Review wurde gestartet.** Commit: `{0}` - [Actions-Run]({1})' -f $shortSha, $env:REVIEW_RUN_URL)
+          } | ConvertTo-Json -Compress | gh api --method POST "$repo/issues/$env:REVIEW_PR_NUMBER/comments" --input - --silent
