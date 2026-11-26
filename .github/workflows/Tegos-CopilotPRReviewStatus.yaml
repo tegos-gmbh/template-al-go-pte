@@ -1,0 +1,90 @@
+name: AL-Go Copilot Review Status
+
+on:
+  pull_request:
+    branches: [master]
+    types: [opened, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: tegos-copilot-review-status-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+
+jobs:
+  review-status:
+    name: Wait for AL-Go Copilot Review
+    if: '!github.event.pull_request.draft'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ALGoOrgSettings: ${{ vars.ALGoOrgSettings }}
+      ALGoRepoSettings: ${{ vars.ALGoRepoSettings }}
+    steps:
+      - name: Checkout trusted settings
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Read review settings
+        uses: microsoft/AL-Go-Actions/ReadSettings@v10.1
+        with:
+          shell: pwsh
+          project: ''
+          workflowName: ''
+          get: CodeReviewAgent
+
+      - name: Follow the review runner
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_UPDATED_AT: ${{ github.event.pull_request.updated_at }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $settings = $env:CodeReviewAgent | ConvertFrom-Json
+          if ($settings.enabled -ne $true -or $env:PR_AUTHOR -in @($settings.excludedAuthors)) {
+            'AL-Go Copilot Review is disabled or not configured for this PR author.' >> $env:GITHUB_STEP_SUMMARY
+            return
+          }
+
+          $repo = "repos/$env:GITHUB_REPOSITORY"
+          $updatedAt = ([DateTimeOffset]$env:PR_UPDATED_AT).ToUnixTimeSeconds()
+          $suffix = "/pr-$env:PR_NUMBER/$env:PR_ACTION/$updatedAt"
+          # A commit can be reviewed for multiple PRs or multiple events on the same PR.
+          $checkQuery = ".check_runs[] | select(.app.slug == `"github-actions`" and (.external_id // `"`" | endswith(`"$suffix`"))) | .external_id"
+          $lookup = "$repo/commits/$env:PR_HEAD_SHA/check-runs?check_name=AL-Go%20Copilot%20Review&filter=all&per_page=100"
+          $deadline = [DateTimeOffset]::UtcNow.AddMinutes(10)
+          do {
+            $externalId = gh api $lookup --paginate --jq $checkQuery | Select-Object -First 1
+            if ($externalId) { break }
+            if ([DateTimeOffset]::UtcNow -ge $deadline) {
+              throw 'The AL-Go review runner did not register a check for this PR event within 10 minutes.'
+            }
+            Start-Sleep -Seconds 15
+          } while ($true)
+          if ($externalId -cnotmatch '^al-go-review-([0-9]+)-([0-9]+)/') {
+            throw 'The AL-Go review check does not identify a valid runner attempt.'
+          }
+          $runId = $Matches[1]
+          $attempt = $Matches[2]
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$runId/attempts/$attempt"
+          "Following AL-Go Copilot Review: $runUrl"
+          "[Open the AL-Go Copilot Review run]($runUrl)" >> $env:GITHUB_STEP_SUMMARY
+          do {
+            $run = gh api "$repo/actions/runs/$runId/attempts/$attempt" | ConvertFrom-Json
+            if ($run.status -ne 'completed') { Start-Sleep -Seconds 15 }
+          } until ($run.status -eq 'completed')
+
+          "Review runner result: **$($run.conclusion)**" >> $env:GITHUB_STEP_SUMMARY
+          if ($run.conclusion -ne 'success') {
+            throw "AL-Go Copilot Review finished with '$($run.conclusion)'. See $runUrl"
+          }

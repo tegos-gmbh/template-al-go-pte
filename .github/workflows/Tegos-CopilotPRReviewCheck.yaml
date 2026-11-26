@@ -36,7 +36,7 @@ jobs:
 
           $headSha = $Matches[1]
           $externalId = "al-go-review-$env:REVIEW_RUN_ID-$env:REVIEW_RUN_ATTEMPT"
-          $query = ".check_runs[] | select(.external_id == `"$externalId`" and .status != `"completed`") | .id"
+          $query = ".check_runs[] | select(.status != `"completed`" and (.external_id // `"`" | . == `"$externalId`" or startswith(`"$externalId/`"))) | .id"
           $checkIds = @(gh api "$repo/commits/$headSha/check-runs?check_name=AL-Go%20Copilot%20Review&filter=all&per_page=100" `
             --paginate --jq $query)
           # The start job can be cancelled after recording the commit but before posting a check.

@@ -12,6 +12,16 @@
     "leafModel": "gpt-6-luna",
     "excludedAuthors": []
   },
+  "BCQuality": {
+    "marketplaceRepo": "https://github.com/tegos-gmbh/BCQuality",
+    "version": "365.2",
+    "enabledLayers": [],
+    "disabledSkills": [],
+    "knowledge": {
+      "allow": [],
+      "deny": []
+    }
+  },
   "customALGoFiles": {
     "filesToInclude": [
       {

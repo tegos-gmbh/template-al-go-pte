@@ -204,6 +204,7 @@ jobs:
     if: needs.prepare.outputs.eligible == 'true'
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       checks: write
       pull-requests: write
     env:
@@ -211,6 +212,15 @@ jobs:
       REVIEW_PR_NUMBER: ${{ needs.prepare.outputs.prNumber }}
       REVIEW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
     steps:
+      - name: Download intake event for PR status correlation
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: copilot-pr-review-metadata
+          path: .copilot-pr-review-metadata
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
+
       - name: Record reviewed commit
         run: |
           if ($env:REVIEW_HEAD_SHA -cnotmatch '^[0-9a-f]{40}$') {
@@ -233,11 +243,19 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $true
+          $event = Get-Content -Raw .copilot-pr-review-metadata/event.json | ConvertFrom-Json
+          if ($event.action -cnotin @('opened', 'reopened', 'synchronize', 'ready_for_review') -or
+              "$($event.pull_request.number)" -ne $env:REVIEW_PR_NUMBER -or
+              $event.pull_request.head.sha -cne $env:REVIEW_HEAD_SHA -or
+              -not $event.pull_request.updated_at) {
+            throw 'The intake event does not match the reviewed pull request.'
+          }
+          $updatedAt = ([DateTimeOffset]$event.pull_request.updated_at).ToUnixTimeSeconds()
           @{
             name = 'AL-Go Copilot Review'
             head_sha = $env:REVIEW_HEAD_SHA
             status = 'in_progress'
-            external_id = "al-go-review-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            external_id = "al-go-review-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT/pr-$env:REVIEW_PR_NUMBER/$($event.action)/$updatedAt"
             details_url = $env:REVIEW_RUN_URL
           } | ConvertTo-Json -Compress | gh api --method POST "repos/$env:GITHUB_REPOSITORY/check-runs" --input - --silent
 
