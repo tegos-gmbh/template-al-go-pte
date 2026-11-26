@@ -5,7 +5,9 @@
   "templateSha": "520ae97e8ca257c05d7785f3d920c74c6cd77996",
   "CodeReviewAgent": {
     "enabled": true,
-    "branches": ["master"],
+    "branches": [
+      "master"
+    ],
     "model": "gpt-6.2-sol",
     "leafModel": "gpt-6-luna",
     "excludedAuthors": []
