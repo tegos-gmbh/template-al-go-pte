@@ -17,6 +17,7 @@ defaults:
 env:
   ALGoOrgSettings: ${{ vars.ALGoOrgSettings }}
   ALGoRepoSettings: ${{ vars.ALGoRepoSettings }}
+  REVIEW_CHECK_NAME: AL-Go Copilot Review
   REVIEW_AGENT_VERSION: 10.0.7
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -71,9 +72,33 @@ jobs:
           workflowHeadSha: ${{ github.event.workflow_run.head_sha }}
           workflowRunId: ${{ github.event.workflow_run.id }}
 
-  review:
+  start_check:
     needs: prepare
     if: needs.prepare.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    outputs:
+      checkId: ${{ steps.check.outputs.checkId }}
+    steps:
+      - name: Show review progress on the PR
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_HEAD_SHA: ${{ needs.prepare.outputs.headSha }}
+        run: |
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $checkId = gh api --method POST "repos/$env:GITHUB_REPOSITORY/check-runs" `
+            -f "name=$env:REVIEW_CHECK_NAME" -f "head_sha=$env:PR_HEAD_SHA" `
+            -f "status=in_progress" -f "details_url=$runUrl" --jq .id
+          if ($LASTEXITCODE -ne 0 -or $checkId -notmatch '^\d+$') {
+            throw 'Could not create the required Copilot review check.'
+          }
+          "checkId=$checkId" >> $env:GITHUB_OUTPUT
+
+  review:
+    needs: [prepare, start_check]
+    if: needs.start_check.result == 'success'
     runs-on: [ windows-latest ]
     permissions:
       contents: read
@@ -197,3 +222,30 @@ jobs:
           name: copilot-pr-review-final-${{ needs.prepare.outputs.prNumber }}
           path: ${{ github.workspace }}/review-output
           if-no-files-found: warn
+
+  finish_check:
+    needs: [start_check, review, publish]
+    if: ${{ always() && needs.start_check.outputs.checkId != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+    steps:
+      - name: Report the completed review on the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_ID: ${{ needs.start_check.outputs.checkId }}
+          REVIEW_RESULT: ${{ needs.review.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+        run: |
+          $conclusion = if ($env:REVIEW_RESULT -eq 'success' -and $env:PUBLISH_RESULT -eq 'success') {
+            'success'
+          } elseif ('cancelled' -in @($env:REVIEW_RESULT, $env:PUBLISH_RESULT)) {
+            'cancelled'
+          } else {
+            'failure'
+          }
+          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/check-runs/$env:CHECK_ID" `
+            -f "status=completed" -f "conclusion=$conclusion" --silent
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not finalize the required Copilot review check.'
+          }
