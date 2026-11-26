@@ -220,14 +220,14 @@ jobs:
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ github.event.workflow_run.id }}
-
+  
       - name: Record reviewed commit
         run: |
           if ($env:REVIEW_HEAD_SHA -cnotmatch '^[0-9a-f]{40}$') {
             throw 'The review did not resolve a valid commit SHA.'
           }
           Set-Content -Path review-check.txt -Value $env:REVIEW_HEAD_SHA
-
+  
       # Record the commit before creating the check so cancellation cannot strand it without a lookup key.
       - name: Register check for finalization
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -236,7 +236,7 @@ jobs:
           path: review-check.txt
           retention-days: 7
           if-no-files-found: error
-
+  
       - name: Mark review in progress
         env:
           GH_TOKEN: ${{ github.token }}
@@ -258,7 +258,7 @@ jobs:
             external_id = "al-go-review-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT/pr-$env:REVIEW_PR_NUMBER/$($event.action)/$updatedAt"
             details_url = $env:REVIEW_RUN_URL
           } | ConvertTo-Json -Compress | gh api --method POST "repos/$env:GITHUB_REPOSITORY/check-runs" --input - --silent
-
+  
       - name: Announce review start in the pull request
         continue-on-error: true
         env:
