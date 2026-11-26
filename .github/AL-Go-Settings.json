@@ -34,12 +34,6 @@
         "sourceFolder": ".github/workflows",
         "filter": "copilot-code-review.yml"
       }
-    ],
-    "filesToExclude": [
-      {
-        "sourceFolder": ".github/workflows",
-        "filter": "CopilotPRReviewRunner.yaml"
-      }
     ]
   }
 }
