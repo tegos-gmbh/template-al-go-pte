@@ -52,11 +52,12 @@ Structure:
 1. A short summary of the changes (2-4 sentences, flowing text).
 2. A blank line.
 3. The heading "## Release Notes" on its own line.
-4. A bullet list with customer- or consultant-relevant changes, if any.
-   Otherwise, leave the section empty without adding placeholder text.
+4. A bullet list with changes relevant to users, consultants, operators,
+   or maintainers. Leave this section empty only if the diff contains no
+   substantive change worth communicating, such as formatting-only edits.
 
-Write the Release Notes for the users and consultants who use
-or configure the extension in the affected customer environment:
+Write the Release Notes for people who use, configure, operate,
+or maintain the extension:
 
 - Describe what changed in the customer-specific workflow, not how
   it was implemented. Do not present it as a change to standard
@@ -68,12 +69,18 @@ or configure the extension in the affected customer environment:
 - Call out any action required before or after deployment, such as
   changes to setup, permissions, integrations or existing data,
   only when supported by the diff.
+- Include meaningful internal changes to reliability, performance,
+  maintenance, automated checks, or test coverage, even when users
+  see no change. Label internal or test-only changes as such and
+  explain what they enable or verify. For example, new AL fixtures
+  for an automated review warrant a note about the checks they
+  exercise, not a claim that the extension gained a feature.
 - If multiple extensions are affected, name the relevant extension
   when it helps distinguish the changes. Omit customer names, tenant
   identifiers and environment URLs from generated text.
 
-Do not include technical internals in the Release Notes:
-no file names, object IDs or code details.
+Describe internal changes by purpose or impact, not implementation details.
+Do not include file names, object IDs, or code details.
 
 When referring to objects, use the German caption translation
 from the XLIFF file if available.
